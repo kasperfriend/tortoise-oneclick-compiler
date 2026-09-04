@@ -306,6 +306,18 @@ if (-not (Test-Path $SourceDir)) {
     git pull origin $Branch
     Pop-Location
 }
+
+# The source repo uses git submodules (src\modules\Eluna, the Lua scripting
+# engine). A plain clone/pull leaves those folders empty, and CMake then dies with
+# "Eluna submodule is missing. Run: git submodule update --init --recursive".
+# Initialize/update them here - recursively, in case a module has submodules of its
+# own - so the configure step finds them whether this is a fresh clone or an
+# existing checkout that predates this fix.
+Push-Location $SourceDir
+git submodule sync --recursive
+git submodule update --init --recursive
+if ($LASTEXITCODE -ne 0) { Fail "Could not initialize the source submodules (Eluna). Check your network/Git access and re-run." }
+Pop-Location
 Ok "Source ready at $SourceDir"
 
 # ---------------------------------------------------------------------------------------
