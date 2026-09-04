@@ -35,6 +35,8 @@ compile-tortoise-wow.bat
 ```
 It will run database before compiling - that's fine, don't worry, it will compile the whole server next, don't close database until the server finishes building
 
+The script clones the server source AND fetches its Git submodule (`src/modules/Eluna`, the Lua scripting engine) - CMake refuses to configure without it, so if you ever clone the source by hand, run `git submodule update --init --recursive` inside it too.
+
 ### 3.1 (optional) Extract client data
 
 Put all extractors into game client folder and run: 1) mapextractor 2) vmapextractor 3) vmap_assembler 4) MoveMapGen(this is the longest, may take a lot of time!)
@@ -74,6 +76,9 @@ It will apply a LONG list of SQL migrations on first launch, which may take arou
 
 | Problem | What to do |
 |---|---|
+| `CMake Error at CMakeLists.txt:50: Eluna submodule is missing` | The source's Lua submodule wasn't fetched. Run `git submodule update --init --recursive` inside the `source` folder, then re-run `compile-tortoise-wow.bat` (current versions of the script do this for you). If GitHub is blocked on your network, set `$BuildEluna = $false` near the top of `compile-tortoise-wow.ps1` and re-run - you get a server without Lua scripting |
+| `CMake configure failed` (other) | Scroll up to the first `CMake Error`. No `Found ACE headers:` line means the vcpkg ACE install failed; a lua.org download failure means Eluna's Lua runtime couldn't be fetched during configure |
+| Bots feel slower than the tuned config suggests / `ElunaErrors.log` mentions parallel object updates | Eluna (Lua) is enabled by default, and one Lua state cannot be shared across threads, so the core forces continent maps back to single-threaded object/visibility updates. If you don't use Lua scripts, set `Eluna.Enabled = 0` in `mangosd.conf` and restart - `RECOMMENDED_mangosd.conf` has no Eluna lines, so add it there too if you use that file |
 | Login fails / unknown account | Wait for `World server is up and running`, then create the account again |
 | Account create does nothing | mangosd is still starting; wait and retry |
 | Realm list is empty or offline | Check that `realmd` and `mangosd` are up: `docker compose ps` |

@@ -121,6 +121,18 @@ setting up the portable database and building the server.
   -> Not a prerequisite issue - this is a separate library the main
      script installs on its own via vcpkg. Nothing to do here.
 
+"CMake Error ... Eluna submodule is missing"
+  -> Not a prerequisite issue either. Eluna (the Lua scripting engine)
+     lives in the server source as a Git SUBMODULE, and a plain clone
+     leaves its folder (source\src\modules\Eluna) empty. Current
+     versions of the compile script fetch it for you. If you are on an
+     older copy, or want to do it by hand, run this inside the "source"
+     folder and then re-run the compile script:
+        git submodule update --init --recursive
+     If your network cannot reach GitHub at all, set $BuildEluna = $false
+     near the top of compile-tortoise-wow.ps1 - the server then builds
+     without Lua scripting.
+
 VS Build Tools installed but the script still says the C++ workload
 isn't found
   -> Open "Visual Studio Installer", click "Modify" on the Build

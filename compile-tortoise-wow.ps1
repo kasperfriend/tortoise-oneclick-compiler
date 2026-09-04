@@ -9,7 +9,9 @@
     1. Installs Git, CMake, VS2022 Build Tools (C++ workload) via winget
     2. Sets up a portable MariaDB (zip, no service, no install) in .\DB
     3. Installs ACE + Boost via vcpkg
-    4. Clones the source, configures, builds, installs the server
+    4. Clones the source, fetches its submodules (Eluna - the Lua scripting
+       engine upstream pins under src\modules\Eluna), configures, builds and
+       installs the server
     5. Creates the 4 game databases, the 'mangos' DB user, imports world
        content + ALL migrations (recursively - a batch of them live in a
        'world' subfolder) + playerbot tables
@@ -42,6 +44,10 @@ $VcpkgDir        = "$RootDir\vcpkg"
 $InstallPrefix   = "$RootDir\server"
 $BuildPlayerbots  = $true     # $false = a server with no bots at all
 $BuildDungeonClear = $true    # smarter bot dungeon-clearing module; requires playerbots
+$BuildEluna       = $true     # Lua scripting engine (Eluna). It is a Git SUBMODULE upstream, so the
+                               # source alone is not enough - this script fetches it (see step 5b).
+                               # Only set $false if that submodule can't be downloaded on your machine;
+                               # you then get a server with no Lua scripts at all.
 $UseExtractors    = $true     # $false only if you already have dbc/maps/vmaps/mmaps
 
 $DbFolder        = "$RootDir\DB"   # portable MariaDB lives here, not installed as a service
@@ -90,7 +96,7 @@ Write-Host "  source:   $SourceDir"
 Write-Host "  vcpkg:    $VcpkgDir"
 Write-Host "  server:   $InstallPrefix"
 Write-Host "  database: $DbFolder (portable, port $DbPort)"
-Write-Host "Playerbots: $BuildPlayerbots | DungeonClear: $BuildDungeonClear | Extractors: $UseExtractors | Client data automation: $(if ($ClientDir) {$ClientDir} else {'off (manual)'})"
+Write-Host "Playerbots: $BuildPlayerbots | DungeonClear: $BuildDungeonClear | Eluna (Lua): $BuildEluna | Extractors: $UseExtractors | Client data automation: $(if ($ClientDir) {$ClientDir} else {'off (manual)'})"
 Write-Host "(Git, CMake, and VS Build Tools install system-wide if missing - those are dev tools, not project data)`n"
 
 if ($RootDir.Length -gt 40) {
@@ -309,6 +315,54 @@ if (-not (Test-Path $SourceDir)) {
 Ok "Source ready at $SourceDir"
 
 # ---------------------------------------------------------------------------------------
+# 5b. Submodules - Eluna (the Lua scripting engine) is NOT part of the source tree itself,
+#     it is a pinned Git submodule at src\modules\Eluna. A plain 'git clone' leaves that
+#     folder empty and CMake then stops dead at configure time with:
+#         CMake Error at CMakeLists.txt:50 (message):
+#           Eluna submodule is missing.  Run: git submodule update --init --recursive
+#     So fetch it here - both for a fresh clone and for an existing checkout, where a
+#     'git pull' can move the pinned submodule commit and leave the folder stale.
+# ---------------------------------------------------------------------------------------
+Step "Fetching source submodules (Eluna Lua engine -> src\modules\Eluna)"
+Push-Location $SourceDir
+git submodule sync --recursive | Out-Null
+git submodule update --init --recursive
+$submodulesFailed = ($LASTEXITCODE -ne 0)
+if ($submodulesFailed) {
+    Warn "git submodule update failed (usually a transient network/GitHub hiccup) - retrying once..."
+    git submodule update --init --recursive
+    $submodulesFailed = ($LASTEXITCODE -ne 0)
+}
+Pop-Location
+
+# Verify the exact file CMake checks for, so a missing or half-fetched Eluna is caught
+# here with a useful message instead of at configure time. Only demanded when this
+# checkout really does pin Eluna as a submodule - upstream could move or drop it, and
+# then a hard failure here would be wrong. Same reason the configure check below only
+# verifies BUILD_ELUNA when this source tree actually has that option.
+$gitmodulesPath  = Join-Path $SourceDir ".gitmodules"
+$sourceCMakePath = Join-Path $SourceDir "CMakeLists.txt"
+$elunaIsSubmodule = (Test-Path $gitmodulesPath) -and ((Get-Content $gitmodulesPath -Raw) -match "src/modules/Eluna")
+$elunaSupported   = (Test-Path $sourceCMakePath) -and ((Get-Content $sourceCMakePath -Raw) -match "BUILD_ELUNA")
+$elunaProbe = Join-Path $SourceDir "src\modules\Eluna\LuaEngine.h"
+
+if ($BuildEluna -and $elunaIsSubmodule -and -not (Test-Path $elunaProbe)) {
+    Fail @"
+The Eluna submodule (src\modules\Eluna) did not download, and CMake refuses to configure
+without it - that is the 'Eluna submodule is missing' error. Try this by hand in a terminal,
+then re-run this script:
+    cd $SourceDir
+    git submodule update --init --recursive src/modules/Eluna
+If GitHub is unreachable from your machine, set `$BuildEluna = `$false near the top of this
+script and re-run - you then get a working server with no Lua scripting.
+"@
+} elseif ($submodulesFailed) {
+    Warn "git submodule update still reported a problem, but $(if (Test-Path $elunaProbe) {'Eluna itself is present, so the build can continue'} else {'this checkout does not pin Eluna, so it may not matter'}). If the build later complains about missing submodule files, re-run 'git submodule update --init --recursive' inside $SourceDir."
+} else {
+    Ok "Submodules up to date$(if (Test-Path $elunaProbe) {' (Eluna present at src\modules\Eluna)'})"
+}
+
+# ---------------------------------------------------------------------------------------
 # 6. Configure, build, install
 # ---------------------------------------------------------------------------------------
 Step "Configuring with CMake"
@@ -325,6 +379,7 @@ if (Test-Path $cmakeCache) {
     $cacheContent = Get-Content $cmakeCache -Raw
     $cacheContent = $cacheContent -replace '(?m)^BUILD_PLAYERBOTS:BOOL=.*$', "BUILD_PLAYERBOTS:BOOL=$(if ($BuildPlayerbots) {'ON'} else {'OFF'})"
     $cacheContent = $cacheContent -replace '(?m)^USE_EXTRACTORS:BOOL=.*$', "USE_EXTRACTORS:BOOL=$(if ($UseExtractors) {'ON'} else {'OFF'})"
+    $cacheContent = $cacheContent -replace '(?m)^BUILD_ELUNA:BOOL=.*$', "BUILD_ELUNA:BOOL=$(if ($BuildEluna) {'ON'} else {'OFF'})"
     $cacheContent = $cacheContent -replace '(?m)^MODULES:[^=]+=.*$', 'MODULES:STRING=disabled'
     $cacheContent = $cacheContent -replace '(?m)^MODULE_MOD_PLAYERBOTS:[^=]+=.*$', "MODULE_MOD_PLAYERBOTS:STRING=$(if ($BuildPlayerbots) {'static'} else {'disabled'})"
     $cacheContent = $cacheContent -replace '(?m)^MODULE_MOD_DUNGEON_CLEAR:[^=]+=.*$', "MODULE_MOD_DUNGEON_CLEAR:STRING=$(if ($BuildDungeonClear) {'static'} else {'disabled'})"
@@ -341,6 +396,7 @@ $cmakeArgs = @(
     "-DCMAKE_INSTALL_PREFIX=$InstallPrefix",
     "-DUSE_EXTRACTORS=$(if ($UseExtractors) {'ON'} else {'OFF'})",
     "-DBUILD_PLAYERBOTS=$(if ($BuildPlayerbots) {'ON'} else {'OFF'})",
+    "-DBUILD_ELUNA=$(if ($BuildEluna) {'ON'} else {'OFF'})",
     "-DMODULES=disabled",
     "-DMODULE_MOD_PLAYERBOTS=$(if ($BuildPlayerbots) {'static'} else {'disabled'})",
     "-DMODULE_MOD_DUNGEON_CLEAR=$(if ($BuildDungeonClear) {'static'} else {'disabled'})",
@@ -351,17 +407,25 @@ if ($BuildPlayerbots) {
 }
 
 & cmake @cmakeArgs
-if ($LASTEXITCODE -ne 0) { Fail "CMake configure failed. Look for 'Found ACE headers:' in the output above to confirm ACE was located." }
+if ($LASTEXITCODE -ne 0) {
+    $hint = "CMake configure failed. Scroll up for the first 'CMake Error' - the usual causes are:"
+    $hint += "`n  - 'Eluna submodule is missing'      -> src\modules\Eluna is empty. Run: git -C `"$SourceDir`" submodule update --init --recursive   (or set `$BuildEluna = `$false and re-run)"
+    $hint += "`n  - ACE not found                     -> look for 'Found ACE headers:' above; if missing, the vcpkg ACE install failed"
+    $hint += "`n  - a lua.org download failure        -> Eluna's Lua runtime is fetched during configure, so that step needs internet access too"
+    Fail $hint
+}
 
 if (Test-Path $cmakeCache) {
     $configuredCache = Get-Content $cmakeCache -Raw
     $expectedPlayerbotMode = if ($BuildPlayerbots) { 'ON' } else { 'OFF' }
     $expectedPlayerbotModuleMode = if ($BuildPlayerbots) { 'static' } else { 'disabled' }
     $expectedDungeonClearMode = if ($BuildDungeonClear) { 'static' } else { 'disabled' }
+    $expectedElunaMode = if ($BuildEluna) { 'ON' } else { 'OFF' }
     if ($configuredCache -notmatch "(?m)^BUILD_PLAYERBOTS:[^=]+=$expectedPlayerbotMode\s*$" -or
+        ($elunaSupported -and $configuredCache -notmatch "(?m)^BUILD_ELUNA:[^=]+=$expectedElunaMode\s*$") -or
         $configuredCache -notmatch "(?m)^MODULE_MOD_PLAYERBOTS:[^=]+=$expectedPlayerbotModuleMode\s*$" -or
         $configuredCache -notmatch "(?m)^MODULE_MOD_DUNGEON_CLEAR:[^=]+=$expectedDungeonClearMode\s*$") {
-        Fail "CMake configured but the playerbot modules do not match this script's settings. Delete $buildDir and re-run if this stale build directory cannot be repaired automatically."
+        Fail "CMake configured but the playerbot/Eluna options do not match this script's settings. Delete $buildDir and re-run if this stale build directory cannot be repaired automatically."
     }
 }
 Ok "Configure complete"
@@ -380,6 +444,16 @@ Step "Copying required DLLs next to mangosd.exe"
 Copy-Item "$vcpkgInstalled\bin\ACE.dll" $InstallPrefix -Force
 if ($BuildPlayerbots) { Copy-Item "$vcpkgInstalled\bin\boost_*.dll" $InstallPrefix -Force }
 Ok "DLLs copied"
+
+# Eluna reads its scripts from the folder named by Eluna.ScriptPath in mangosd.conf
+# ("./lua_scripts", relative to mangosd.exe). The install step copies Eluna's bundled
+# extensions into it; make sure it exists regardless, because a missing script path only
+# shows up later as confusing Lua errors on first start.
+if ($BuildEluna) {
+    $luaScriptsDir = Join-Path $InstallPrefix "lua_scripts"
+    if (-not (Test-Path $luaScriptsDir)) { New-Item -ItemType Directory -Force -Path $luaScriptsDir | Out-Null }
+    Ok "Lua script folder ready: $luaScriptsDir"
+}
 Pop-Location
 
 # ---------------------------------------------------------------------------------------
@@ -655,5 +729,12 @@ if (-not ($ClientDir -and (Test-Path $ClientDir))) {
 }
 Write-Host "  2. Put the same address ($RealmAddress) into the client's realmlist.wtf."
 Write-Host "  3. Run start-all.bat, then in the mangosd window: account create <name> <password>, then account set gmlevel <name> 3 -1 if you want GM."
-Write-Host "`n(Full detail: $SourceDir\INSTALL-WINDOWS.md)" -ForegroundColor Gray
+if ($BuildEluna) {
+    Write-Host "`nLua scripting (Eluna) is built in and enabled by default (Eluna.Enabled in mangosd.conf)." -ForegroundColor Green
+    Write-Host "Drop .lua files into $InstallPrefix\lua_scripts - Eluna's own bundled extensions are already there." -ForegroundColor Green
+    Write-Host "Heads up: a single Lua state is not thread safe, so while Eluna.Enabled = 1 the core switches" -ForegroundColor Yellow
+    Write-Host "continent maps back to single-threaded object/visibility updates (it says so in ElunaErrors.log)." -ForegroundColor Yellow
+    Write-Host "If you don't need Lua and want the parallel map updates from RECOMMENDED_mangosd.conf, set Eluna.Enabled = 0." -ForegroundColor Yellow
+}
+Write-Host "`n(Full detail: $SourceDir\INSTALL-WINDOWS.md, and $SourceDir\docs\ELUNA.md for Lua scripting)" -ForegroundColor Gray
 Read-Host "`nPress Enter to close"
